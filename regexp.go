@@ -2,10 +2,12 @@ package onigmo
 
 /*
 #cgo CFLAGS: -I/usr/local/include
-#cgo LDFLAGS: -L/usr/local/lib -lonigmo
+#cgo LDFLAGS: -L/usr/local/lib -lonigmo -v
 #include <stdlib.h>
 #include <string.h>
 #include <onigmo.h>
+
+typedef int(*nodeCallbackFunc)(int,OnigPosition,OnigPosition,int,int,void*);
 
 // cgo does not support vargs
 extern int onigmo_helper_error_code_with_info_to_str(UChar* err_buf, int err_code, OnigErrorInfo *errInfo);
@@ -22,6 +24,14 @@ char* onigmo_helper_get(char* str, OnigPosition* beg, OnigPosition* end, int n) 
     char *res = strndup((char*)(str + beg[n]), end[n] - beg[n]);
     return res;
 }
+
+// gateway function
+int nodeCallback_cgo(int group, OnigPosition beg, OnigPosition end, int level, int at, void* arg)
+{
+  void nodeCallback(int group, OnigPosition beg, OnigPosition end, int level, int at, void* arg);
+	nodeCallback(group, beg, end, level, at, arg);
+  return 0;
+}
 */
 import "C"
 
@@ -32,6 +42,30 @@ import (
 	"sync"
 	"unsafe"
 )
+
+type captureBuild struct {
+	input *C.char
+	groups []string
+}
+
+//export nodeCallback
+func nodeCallback(group int32, beg, end C.OnigPosition, level, at int32, arg unsafe.Pointer) {
+	cb := (*captureBuild)(arg)
+	cb.groups[group] = C.onigmo_helper_get(cb.input, beg, end, group)
+}
+
+func (m *MatchResult) Groups() ([]string, error) {
+	groupCount := C.onig_number_of_captures(m.regex)
+	cb := &captureBuild{C.CString(m.input), make([]string, groupCount)}
+	for gn := 0; gn < groupCount; gn++ {
+		r := C.onig_capture_tree_traverse(m.region, C.ONIG_TRAVERSE_CALLBACK_AT_FIRST,
+			(C.nodeCallback_cgo)(unsafe.Pointer(C.nodeCallback_cgo)), unsafe.Pointer(cb));
+		if r < 0 {
+			return nil, fmt.Errorf("unable to extract group data for group %d", gn)
+		}
+	}
+	return cb.groups, nil
+}
 
 var (
 	// OnigEncodingUTF8 for onigmo encoding
@@ -177,6 +211,10 @@ func (re *Regexp) match(b []byte) bool {
 	}
 }
 
+func (re *Regexp) MatchResult() *MatchResult {
+	return re.matchResult
+}
+
 // MatchString checks words
 func (re *Regexp) MatchString(s string) bool {
 	b := []byte(s)
@@ -227,6 +265,11 @@ func (re *Regexp) search(b []byte) bool {
 func (re *Regexp) SearchString(s string) bool {
 	b := []byte(s)
 	return re.search(b)
+}
+
+// String returns the string that this expression originated from
+func (re *Regexp) String() string {
+	return re.expr
 }
 
 func (m *MatchResult) getNamedGroupNums(s string) ([]C.int, error) {
